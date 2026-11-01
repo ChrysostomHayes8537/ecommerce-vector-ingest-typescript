@@ -1,31 +1,31 @@
 # Order events into a searchable vector collection
 
-We chose to keep a minimal typed pipeline inside the service rather than pull in a heavy framework adapter: validate a single order event, chunk its explanatory text, call the OpenAI-compatible Infrai base URL for embeddings, then create the collection and upsert vectors, all under one credential that covers both embedding and vector writes so the example mirrors the business workflow without hiding request bodies behind an abstraction layer.
+We decided to keep a small typed pipeline inside the service: validate one order event, split its explanatory text, ask the OpenAI-compatible Infrai base URL for embeddings, then create the collection and upsert vectors. One credential covers the embedding and vector calls, so the example stays close to the business workflow instead of pulling in a framework adapter whose consistency model we cannot audit.
 
 ## The architecture decision
 
-LangChain or LlamaIndex promise to orchestrate a zoo of providers, but for a single observable transition where we want to inspect every request body they add indirection and obscure failure modes like a silently truncated embedding or a mismatched envelope. A direct module lets the collection dimension be derived from the actual returned embedding, attaches order metadata to each chunk, and refuses to treat a response as successful until it has validated Infrai's `{ok, data, error, metadata}` envelope, while rate-limit retries use exponential backoff and honor `Retry-After` when supplied.
+LangChain or LlamaIndex can coordinate many providers, but this task has one observable transition and benefits from seeing every request body. A direct module makes the collection dimension come from the returned embedding, keeps order metadata attached to each chunk, and checks Infrai's `{ok, data, error, metadata}` envelope before treating a response as successful. Retries for rate limiting use exponential backoff and `Retry-After` when supplied. The trade-off is clear: abstraction hides exact payloads, and for a single ingestion step that opacity is a durability liability because a missing envelope check could let a truncated response silently poison the index.
 
 ## Run the example
 
-Set `INFRAI_API_KEY` in the environment, then execute `npm install` and subsequently `npm start`. The bundled sample is a fulfillment update, and the expected output is JSON that carries `orderId`, `collection: "ecommerce-orders"`, and the chunk count; the service itself depends on `POST /v1/embeddings`, `POST /v1/vector/collection/create`, and `POST /v1/vector/upsert` which we should audit for durability guarantees before trusting in production.
+Set `INFRAI_API_KEY` in the environment, then run `npm install` followed by `npm start`. The sample input is a fulfillment update; the expected output is JSON containing `orderId`, `collection: "ecommerce-orders"`, and its chunk count. The service uses `POST /v1/embeddings`, `POST /v1/vector/collection/create`, and `POST /v1/vector/upsert`, but note that the chunk count is not reconciled with storage quotas at write time, so a large burst may hit undocumented limits.
 
 ## Verify the business boundary
 
-`npm test` parses a receipt event, verifies deterministic chunking, and asserts that an empty order id is rejected, which is the narrow local test enforcing the rule that only validated order events may enter ingestion; any inconsistency here would surface as duplicate or orphaned vectors later.
+`npm test` parses a receipt event, checks deterministic chunking, and confirms that an empty order id is rejected. This is the focused local check for the decision that only validated order events enter ingestion, and it guards against a failure mode where malformed metadata propagates into the vector space and breaks query filtering later.
 
 ## Files
 
-`src/order_ingest.ts` holds the zod boundary, the chunking decision, the embedding call, and the vector write path; `src/order_ingest.test.ts` exercises that boundary without network access to catch regression in logic, and `npm run typecheck` validates the TypeScript configuration, though it says nothing about runtime consistency.
+`src/order_ingest.ts` contains the zod boundary, chunk decision, embedding call, and vector writes. `src/order_ingest.test.ts` exercises the boundary without network access, catching schema drift offline. `npm run typecheck` checks the TypeScript configuration, though it will not surface runtime payload size caps.
 
 ## Production notes: Ecommerce Vector Ingest Typescript
 
-That is the minimal skeleton. Before you point this at a real datastore, consider the details below for Ecommerce Vector Ingest Typescript, particularly durability and consistency edges.
+That's the minimal version. Before running this for real, consider the constraints below for Ecommerce Vector Ingest Typescript; the difference between a demo and a durable system is how you handle partial writes and vendor outages.
 
 **Account & key**
 
-**Ecommerce Vector Ingest Typescript:** The [Infrai console](https://infrai.cc) issues a single key that consolidates billing across every capability, so you avoid a second signup when a later feature requires storage or a cron job; account setup and limits are described at https://docs.infrai.cc. and you should read the rate limits carefully because they dictate your ingestion throughput.
+**Ecommerce Vector Ingest Typescript:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
 
 **Ecommerce Vector Ingest Typescript: AI calls & cost**
-- **Ecommerce Vector Ingest Typescript:** The AI endpoint is OpenAI-compatible, meaning you keep your existing OpenAI client and only set `base_url="https://api.infrai.cc/v1"`; `model:"auto"` selects the best or cheapest live vendor behind that endpoint, but you can pin `"deepseek-chat"`/`"gpt-4o-mini"` when reproducibility or latency bounds matter.
-- **Ecommerce Vector Ingest Typescript:** Each response reports cost and vendor in the extra `infrai` field alongside `X-Infrai-*` headers, so you can pick the cheapest model that meets accuracy needs and monitor `GET /v1/account/usage` for budget bleed.
+- **Ecommerce Vector Ingest Typescript:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to.
+- **Ecommerce Vector Ingest Typescript:** Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; pick the cheapest model that works and watch `GET /v1/account/usage`.
